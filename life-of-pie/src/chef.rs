@@ -215,11 +215,18 @@ impl Chef {
     /// }
     /// ```
     pub async fn create_dough(&self, kitchen: &Kitchen) -> PizzaResult<Dough> {
-        // Acquire flour from fridge by first acquiring a lock on the fridge and then retrieving flour from it.
-        // Acquire a table to mix the flour into dough by using the rwlock_modify_one_of_these function and then use the table to mix the flour into dough.
-        // Now propagate any errors from mix_flour_into_dough and return the result
-        todo!("Implement create_dough method!");
+
+        let mut fridge = kitchen.fridge.lock().await;
+        let flour = fridge.portions_of_flour.pop().ok_or(PizzaError::OutOfFlour)?;
+        drop(fridge); 
+    
+        let mut table = rwlock_modify_one_of_these(&kitchen.tables).await;
+    
+        let hydrated_dough = table.mix_flour_into_dough(flour).await?;
+    
+        Ok(hydrated_dough)
     }
+    
 
     /// # Develop Dough
     ///
@@ -264,11 +271,19 @@ impl Chef {
         kitchen: &Kitchen,
         dough_to_mix: Dough,
     ) -> PizzaResult<Dough> {
-        // Validate the dough state before proceeding
-        // Acquire a mixer to develop the dough by using the mutex_acquire_one_of_these function and then use the mixer to mix the dough.
-        // Propagate errors from mix_dough and return the result
-        todo!("Implement develop_dough method!");
+        if dough_to_mix != Dough::Hydrated {
+            return Err(PizzaError::IncorrectDoughState(
+                "You can only put Hydrated Dough in the Mixer".to_string(),
+            ));
+        }
+
+        let mixer = mutex_acquire_one_of_these(&kitchen.mixers).await;
+
+        let mixed_dough = mixer.mix_dough(dough_to_mix).await?;
+
+        Ok(mixed_dough)
     }
+
 
     /// # Ferment Dough
     ///
@@ -317,14 +332,21 @@ impl Chef {
         dough_to_ferment: Dough,
         station_id: Option<usize>,
     ) -> PizzaResult<tokio::sync::oneshot::Receiver<Dough>> {
-        // Validate the dough state before proceeding
-        // Acquire access to the fridge to start fermentation
-        // Start the fermentation process using the fridge's leave_dough_to_ferment method
-        // if station_id is Some, use it to track the fermentation process (pass it to the fridge method)
-        // if station_id is None, use the default approach (0 for the id)
-        // Return the receiver so the chef can await the fermented dough
-        todo!("Implement ferment_dough method!");
+        if dough_to_ferment != Dough::Mixed {
+            return Err(PizzaError::IncorrectDoughState(
+                "You can only ferment Mixed Dough!".to_string(),
+            ));
+        }
+    
+        let mut fridge = kitchen.fridge.lock().await;
+    
+        let receiver = fridge
+            .leave_dough_to_ferment(dough_to_ferment, station_id.unwrap_or(0))
+            .await?;
+    
+        Ok(receiver)
     }
+    
 
     /// # Prove Dough
     ///
@@ -366,14 +388,26 @@ impl Chef {
     /// ```
     pub async fn prove_dough(
         &self,
+        dough_receiver: tokio::sync::oneshot::Receiver<Dough>,
         kitchen: &Kitchen,
-        fermented_dough_receiver: tokio::sync::oneshot::Receiver<Dough>,
-    ) -> PizzaResult<tokio::sync::oneshot::Receiver<Dough>> {
-        // Await the fermented dough from the receiver first and validate it
-        // Get access to the proving room
-        // Start the proving process with the proving room methods and return the receiver
-        todo!("Implement prove_dough method!");
+    ) -> PizzaResult<Dough> {
+        let dough = dough_receiver.await.map_err(|_| {
+            PizzaError::FermentationFailed("Fermentation process was dropped!".to_string())
+        })?;
+    
+        if dough != Dough::Fermented {
+            return Err(PizzaError::IncorrectDoughState(
+                "Expected Fermented Dough!".to_string(),
+            ));
+        }
+    
+        let mut proving_room = rwlock_modify_one_of_these(&kitchen.proving_rooms).await;
+    
+        let proved_dough = proving_room.prove_dough(dough).await?;
+    
+        Ok(proved_dough)
     }
+    
 
     /// # Prepare Pizza Base
     ///
@@ -416,10 +450,21 @@ impl Chef {
         proved_dough: Dough,
     ) -> PizzaResult<Dough> {
         // Validate the dough state
-        // Acquire a table to shape the dough (use the rwlock_modify_one_of_these function to help!)
-        // Shape the dough into a pizza base and return it, propagating any errors
-        todo!("Implement prepare_pizza_base method!");
+        if dough != Dough::Proved {
+            return Err(PizzaError::IncorrectDoughState(
+                "Only Proved Dough can be used to create a Pizza Base!".to_string(),
+            ));
+        }
+    
+        // Acquire a roller
+        let roller = mutex_acquire_one_of_these(&kitchen.rollers).await;
+    
+        // Flatten the dough into a pizza base
+        let base = roller.flatten_dough_into_base(dough).await?;
+    
+        Ok(base)
     }
+    
 
     /// # Puree Sauce
     ///
@@ -452,12 +497,21 @@ impl Chef {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn puree_sauce(&self, kitchen: &Kitchen) -> PizzaResult<Tomato> {
-        // Get a tomato from the fridge
-        // Acquire a mixer to puree the tomato (similar to arbitrary resource acquisition from before!)
-        // Propagate errors from mix_tomato_into_puree and return the result
-        todo!("Implement puree_sauce method!");
+    pub async fn puree_sauce(&self, kitchen: &Kitchen) -> PizzaResult<Sauce> {
+        // Step 1: Access the fridge to get tomatoes
+        let mut fridge = kitchen.fridge.lock().await;
+        let tomatoes = fridge.tomatoes.pop().ok_or(PizzaError::OutOfTomatoes)?;
+        drop(fridge); // release fridge lock
+    
+        // Step 2: Acquire a blender
+        let blender = mutex_acquire_one_of_these(&kitchen.blenders).await;
+    
+        // Step 3: Puree the tomatoes
+        let sauce = blender.puree_tomatoes_into_sauce(tomatoes).await?;
+    
+        Ok(sauce)
     }
+    
 
     /// # Shred Cheese
     ///
@@ -490,10 +544,21 @@ impl Chef {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn shred_cheese(&self, kitchen: &Kitchen) -> PizzaResult<Cheese> {
-        // Similar to puree_sauce!
-        todo!("Implement shred_cheese method!");
+    pub async fn shred_cheese(&self, kitchen: &Kitchen) -> PizzaResult<ShreddedCheese> {
+        // Step 1: Access the fridge to get cheese
+        let mut fridge = kitchen.fridge.lock().await;
+        let cheese = fridge.cheeses.pop().ok_or(PizzaError::OutOfCheese)?;
+        drop(fridge); // release fridge lock
+    
+        // Step 2: Acquire a grater
+        let grater = mutex_acquire_one_of_these(&kitchen.graters).await;
+    
+        // Step 3: Shred the cheese
+        let shredded = grater.shred_cheese(cheese).await?;
+    
+        Ok(shredded)
     }
+    
 
     /// # Combine Ingredients to Form Pizza
     ///
@@ -545,11 +610,20 @@ impl Chef {
         cheese: Cheese,
     ) -> PizzaResult<Pizza> {
         // Validate all ingredient states before proceeding
+        if pizza_base != Dough::Rounded || tomato_sauce != Tomato::Pureed || cheese != Cheese::Grated {
+            return Err(PizzaError::IncorrectIngredientState(
+                "You can only combine Pureed Tomato, Grated Cheese, and Rounded Dough to form an Uncooked Pizza!".to_string(),
+            ));
+        }
+    
         // Acquire a table to assemble the pizza
+        let _table = rwlock_modify_one_of_these(&kitchen.tables).await;
+    
         // Propagate errors from top_pizza_base_with_ingredients and return the result
-        todo!("Implement combine_cold_ingredients_to_form_uncooked_pizza method!");
+        Pizza::top_pizza_base_with_ingredients(pizza_base, tomato_sauce, cheese)
     }
-
+    
+    
     /// # Cook Pizza
     ///
     /// Cooks an uncooked pizza in an oven.
@@ -586,12 +660,27 @@ impl Chef {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn cook_pizza(&self, kitchen: &Kitchen, uncooked_pizza: Pizza) -> PizzaResult<Pizza> {
-        // Validate the pizza state!
-        // Acquire an oven to cook the pizza
-        // Propagate errors from oven's cook_pizza method and return the result
-        todo!("Implement cook_pizza method!");
+    pub async fn cook_pizza(
+        &self,
+        kitchen: &Kitchen,
+        pizza: Pizza,
+    ) -> PizzaResult<Pizza> {
+        // Validate pizza state
+        if pizza != Pizza::Uncooked {
+            return Err(PizzaError::IncorrectPizzaState(
+                "Expected Uncooked Pizza.".to_string(),
+            ));
+        }
+    
+        // Acquire an oven
+        let oven = mutex_acquire_one_of_these(&kitchen.ovens).await;
+    
+        // Bake the pizza
+        let cooked_pizza = oven.bake_pizza(pizza).await?;
+    
+        Ok(cooked_pizza)
     }
+    
 }
 
 #[cfg(test)]
